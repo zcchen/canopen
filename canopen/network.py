@@ -32,11 +32,17 @@ Callback = Callable[[int, bytearray, float], None]
 class Network(MutableMapping):
     """Representation of one CAN bus containing one or more nodes."""
 
-    def __init__(self, bus: Optional[can.BusABC] = None):
+    def __init__(self, bus: Optional[can.BusABC] = None,
+                 str: trace_file = None,
+                 dict: trace_fiel_kw = {}):
         """
         :param can.BusABC bus:
             A python-can bus instance to re-use.
         """
+        if trace_file:
+            self.__trace_file = TraceFile(trace_file, **trace_file_kw)
+        else:
+            self.__trace_file = None
         #: A python-can :class:`can.BusABC` instance which is set after
         #: :meth:`canopen.Network.connect` is called
         self.bus = bus
@@ -136,6 +142,10 @@ class Network(MutableMapping):
     def __exit__(self, type, value, traceback):
         self.disconnect()
 
+    def __del__(self):
+        if self.__trace_file:
+            del self.__trace_file
+
     def add_node(
         self,
         node: Union[int, RemoteNode, LocalNode],
@@ -213,6 +223,8 @@ class Network(MutableMapping):
         with self.send_lock:
             self.bus.send(msg)
         self.check()
+        if self.__trace_file:
+            self.__trace_file.write(can_id, data, timestamp)
 
     def send_periodic(
         self, can_id: int, data: bytes, period: float, remote: bool = False
@@ -251,6 +263,8 @@ class Network(MutableMapping):
             for callback in callbacks:
                 callback(can_id, data, timestamp)
         self.scanner.on_message_received(can_id)
+        if self.__trace_file:
+            self.__trace_file.write(can_id, data, timestamp)
 
     def check(self) -> None:
         """Check that no fatal error has occurred in the receiving thread.
@@ -406,3 +420,82 @@ class NodeScanner:
         sdo_req = b"\x40\x00\x10\x00\x00\x00\x00\x00"
         for node_id in range(1, limit + 1):
             self.network.send_message(0x600 + node_id, sdo_req)
+
+
+class TraceFile:
+
+    def __init__(self, filepath: str, colsep: str = '\t', linesep: str = os.linesep):
+        self.__fd = open(filepath, 'w')
+        self.__colsep = colsep
+        self.__linesep = linesep
+        self.__fd.write(self.__colsep.join(self.get_header()) + self.__linesep)
+
+    def __del__(self):
+        self.__fd.close()
+
+    def write(self, timestamp: float, can_id: int, data: bytearray) -> None:
+        self.__fd.write(self.__colsep.join(self.format_data(timestamp, can_id, data)) + self.__linesep)
+
+    def get_header(self) -> List:
+        return ["timestamp", "Cob-ID", "Node-ID", "Method", "Data(Hex)"]
+
+    def format_data(self, timestamp: str, cob_id: int, data: bytearray) -> List:
+        l_cob_id = cob_id
+        l_data = ""
+        for d in data:
+            l_data += " {}".format(hex(d))
+        if cob_id == 0:
+            l_canid = 0
+            l_method = 'NMT'
+        elif cob_id >  0 and cob_id < 0x080:
+            l_canid = 0
+            l_method = 'NMT-Special'
+        elif cob_id == 0x080:
+            l_canid = 0
+            l_method = 'SYNC'
+        elif cob_id >  0x080 and cob_id < 0x100:
+            l_canid = cob_id - 0x080
+            l_method = 'EMCY'
+        elif cob_id == 0x100:
+            l_canid = 0
+            l_method = 'TIMESTAMP'
+        elif cob_id >  0x100 and cob_id < 0x180:
+            l_canid = 0
+            l_method = 'Safety-Data-Obj'
+        elif cob_id >= 0x180 and cob_id < 0x200:
+            l_canid = cob_id - 0x180
+            l_method = 'TPDO1'
+        elif cob_id >= 0x200 and cob_id < 0x280:
+            l_canid = cob_id - 0x200
+            l_method = 'RPDO1'
+        elif cob_id >= 0x280 and cob_id < 0x300:
+            l_canid = cob_id - 0x280
+            l_method = 'TPDO2'
+        elif cob_id >= 0x300 and cob_id < 0x380:
+            l_canid = cob_id - 0x300
+            l_method = 'RPDO2'
+        elif cob_id >= 0x380 and cob_id < 0x400:
+            l_canid = cob_id - 0x380
+            l_method = 'TPDO3'
+        elif cob_id >= 0x400 and cob_id < 0x480:
+            l_canid = cob_id - 0x400
+            l_method = 'RPDO3'
+        elif cob_id >= 0x480 and cob_id < 0x500:
+            l_canid = cob_id - 0x480
+            l_method = 'TPDO4'
+        elif cob_id >= 0x500 and cob_id < 0x580:
+            l_canid = cob_id - 0x500
+            l_method = 'RPDO4'
+        elif cob_id >= 0x580 and cob_id < 0x600:
+            l_canid = cob_id - 0x580
+            l_method = 'SDO'
+        elif cob_id >= 0x600 and cob_id < 0x700:
+            l_canid = cob_id - 0x600
+            l_method = 'SDO'
+        elif cob_id >= 0x700 and cob_id <= 0x7FF:
+            l_canid = cob_id - 0x700
+            l_method = 'NMT-monitor'
+        else:
+            l_canid = -1
+            l_method = 'UNKNOWN'
+        return [str(timestamp), hex(l_cob_id), str(l_canid), l_method, l_data]
